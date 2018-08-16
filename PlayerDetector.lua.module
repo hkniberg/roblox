@@ -1,16 +1,19 @@
 --[[
-Latest version of this module: https://www.roblox.com/library/2219045576/PlayerDetector
-Demo & test place: https://www.roblox.com/games/2209032875/PlayerDetector-Demo-Test	
+This code as a shared model: https://www.roblox.com/library/2219045576/PlayerDetector
+Demo & test place: https://www.roblox.com/games/2209032875/PlayerDetector-Demo-Test
+Source code: https://github.com/hkniberg/roblox/blob/master/PlayerDetector.lua.module
 	
 ===============================================
 WHAT IS THIS?
 
 	This script turns any part or model into a "detector block",
-	that knows which players are here and fires events as players enter or exit.
+	so it knows which players are inside and fires events as players enter or exit.
 	
 	This is tricker than it seems, because Roblox touch events are pretty 
 	wonky and unpredictable. This module spares you from having to worry about the dirty 
 	details of that.
+	
+	Feel free to use/modify/embed this source code as you like.
 
 ===============================================
 HOW DO I USE IT?
