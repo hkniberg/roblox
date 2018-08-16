@@ -1,1 +1,337 @@
+--[[
+Latest version of this module: https://www.roblox.com/library/2219045576/PlayerDetector
+Demo & test place: https://www.roblox.com/games/2209032875/PlayerDetector-Demo-Test	
+	
+===============================================
+WHAT IS THIS?
 
+	This script turns any part or model into a "detector block",
+	that knows which players are here and fires events as players enter or exit.
+	
+	This is tricker than it seems, because Roblox touch events are pretty 
+	wonky and unpredictable. This module spares you from having to worry about the dirty 
+	details of that.
+
+===============================================
+HOW DO I USE IT?
+
+	Suppose you want to detect which players enter the Kitchen in your world.
+	1) Create a semi-transparent Part that covers the whole kitchen. Make it CanCollide = false.
+	2) Create a script inside that calls playerDetector.initDetectorBlock(kitchen)
+	3) Use onPlayerEntered/onPlayerLeft to receive callback when people enter/leave
+	4) Use getPlayerNames/getPlayerCount to find out who is there at any given moment
+	
+	Here is an example of how your script might look like to track players in the kitchen:
+	
+		local kitchen = script.Parent
+		local playerDetector = require(workspace.PlayerDetector)
+		
+		playerDetector.initDetectorBlock(kitchen) --this will also make the detector block invisible
+		
+		playerDetector.onPlayerEntered(kitchen, function(playerName)
+			print(playerName.." has entered the kitchen")
+			-- do something cool to the player
+		end)
+		
+===============================================
+OK, GIVE ME THE DETAILS:
+
+	This module contains 5 functions:
+	
+	initDetectorBlock(detectorBlock, hide, log, gui)
+	  Always start here. Makes the given part/model player aware. Parameters:
+	    - detectorBlock: a part, or model consisting of parts. 
+	    - hide: (optional) true if the detectorBlock should be hidden. Default is true.
+	    - log: (optional) true if we should log to the console when players enter/exit. Default is false.
+	    - gui: (optional) a TextLabel other similar gui object. 
+	                      All players in the block will be listed there. Mostly for testing.
+	
+	getPlayerNames(detectorBlock)
+	  returns an array of player names who are inside the given block right now.
+	
+	getPlayerCount(detectorBlock)
+	  pretty self-explanatory...
+	
+	onPlayerEntered(detectorBlock, callback)
+	  registers a callback that is triggered whenever a player enters the given block.
+	  the callback receives playerName as parameter.
+	
+	onPlayerLeft(detectorBlock, callback)
+	  yep, you guessed it...		
+--]]
+
+local playerDetector = {}
+local minCheckInterval = 0.2 --I will never check for players more often than this, even if events are spammed.
+local maxCheckInterval = 1 --I will never wait longer than this between checks, even if events are missing.
+
+function playerDetector.initDetectorBlock(detectorBlock, hide, log, gui)
+	if (hide == nil) then
+		hide = true
+	end
+	if (log == nil) then
+		log = false
+	end
+
+	-- Hide the detectorBlock if desired
+	if (hide == true) then
+		doToAllParts(detectorBlock, function(part)
+			part.Transparency = 1			
+		end)
+	end
+	
+	-- Create a variable to store player names.
+	-- This is stored as a serialized table
+	local PlayerNames = createObject(detectorBlock, "PlayerNames", "StringValue")
+	PlayerNames.Value = game.HttpService:JSONEncode({})
+
+	-- Create a variable to store player count
+	local PlayerCount = createObject(detectorBlock, "PlayerCount", "IntValue")
+	
+	-- Create bindable events for player entering and player leaving
+	local PlayerEntered = createObject(detectorBlock, "PlayerEntered", "BindableEvent")
+	local PlayerLeft = createObject(detectorBlock, "PlayerLeft", "BindableEvent")
+	
+	-- Create a bindable function for getting player names
+	local GetPlayerNames = createObject(detectorBlock, "GetPlayerNames", "BindableFunction")
+	GetPlayerNames.OnInvoke = function()
+		local playerNames = game.HttpService:JSONDecode(detectorBlock.PlayerNames.Value)
+		-- playerNames is table indexed by playerName rather than number,
+		-- so table.getn(...) will return 0. That can be confusing,
+		-- so let's turn it into a normal countable table.
+		return getArray(playerNames)
+	end
+	
+	-- Create a variable to keep track of when last check was done
+	local LastChecked = createObject(detectorBlock, "LastChecked", "IntValue")
+	
+	-- Create a varialble which, if true, means a check should be done at the next opportunity	
+	local CheckNeeded = createObject(detectorBlock, "CheckNeeded", "BoolValue")
+	
+	-- Keep the GUI up to date (if one was given)
+	if (gui) then
+		showPlayerNamesInGui(detectorBlock, gui)
+		PlayerNames.Changed:Connect(function() 
+			showPlayerNamesInGui(detectorBlock, gui)	
+		end)
+	end
+	
+	-- Log what happens (if desired)
+	if (log) then
+		local longName = detectorBlock.Parent.Name .. "." .. detectorBlock.Name
+		print(longName..": I will log when players enter & exit tbis block.")
+		playerDetector.onPlayerEntered(detectorBlock, function(playerName)
+			print("+ "..longName..": "..playerName.. " entered. "..playerDetector.getPlayerCount(detectorBlock).." players are here now.")
+		end)		
+		playerDetector.onPlayerLeft(detectorBlock, function(playerName)
+			print("- "..longName..": "..playerName.. " left. "..playerDetector.getPlayerCount(detectorBlock).." players are here now.")
+		end)		
+	end
+
+	-- Listen for Touch and TouchEnded events,
+	-- and set CheckNeeded to true when that happens.
+	doToAllParts(detectorBlock, function(part)
+		-- Listen for Touched events	
+		part.Touched:Connect(function(touchedByPart)
+			if (touchedByPart.Name == "HumanoidRootPart") then
+				CheckNeeded.Value = true
+			end
+		end) 
+		
+		-- Listen for TouchEnded events
+		part.TouchEnded:Connect(function(touchedEndedByPart)
+			if (touchedEndedByPart.Name == "HumanoidRootPart") then
+				CheckNeeded.Value = true
+			end
+		end) 		
+	end)
+	
+	-- Start a background thread where we check who is here every maxCheckInterval
+	-- Because there are some situations where players can sneak in our out without
+	-- a Touch or TouchEnded event being fired.
+	spawn(function()
+		while true do
+			wait(minCheckInterval)
+			maybeCheckWhoIsHere(detectorBlock)
+		end
+	end)
+end
+
+-- Returns a table of player names that are currently inside the block
+function playerDetector.getPlayerNames(detectorBlock)
+	return detectorBlock.GetPlayerNames:Invoke()
+end
+
+-- Returns the number of players currently inside the block
+function playerDetector.getPlayerCount(detectorBlock)
+	return detectorBlock.PlayerCount.Value
+end
+
+-- Registers a callback to be called every time a player enters the block.
+-- The player name will be given as parameter.	
+function playerDetector.onPlayerEntered(detectorBlock, callback)
+	detectorBlock.PlayerEntered.Event:Connect(callback)
+end
+
+-- Registers a callback to be called every time a player leaves the block.
+-- The player name will be given as parameter.	
+function playerDetector.onPlayerLeft(detectorBlock, callback)
+	detectorBlock.PlayerLeft.Event:Connect(callback)	
+end
+
+-- ======== PRIVATE FUNCTIONS =====================================
+
+-- Executes the given function for the given part,
+-- or for all the child parts in the given model.
+function doToAllParts(partOrModel, whatToDo)
+	if (partOrModel:IsA("BasePart")) then
+		whatToDo(partOrModel)
+	elseif (partOrModel:IsA("Model")) then
+		for _,child in pairs(partOrModel:GetChildren()) do
+			doToAllParts(child, whatToDo)
+		end
+	end
+end
+
+function showPlayerNamesInGui(detectorBlock, gui)
+	local playerNames = playerDetector.getPlayerNames(detectorBlock)
+	local text = ""
+	for _,playerName in pairs(playerNames) do
+		text = text..playerName.."\n"
+	end
+	gui.Text = text
+end
+
+-- Calls checkWhoIsHere unless it was called very recently (< minCheckInterval).
+function maybeCheckWhoIsHere(detectorBlock)
+	local now = tick()
+	
+	local checkNeeded = detectorBlock.CheckNeeded.Value
+	local lastChecked = detectorBlock.LastChecked.Value
+	local timeSinceLastChecked = now - lastChecked
+	
+	if (checkNeeded or (timeSinceLastChecked >= maxCheckInterval)) then
+		checkWhoIsHere(detectorBlock)
+		detectorBlock.LastChecked.Value = now
+	end
+end
+
+-- Checks who is here.
+-- Updates PlayerNames and PlayerCount, and fires PlayerEntered and PlayerLeft events.
+function checkWhoIsHere(detectorBlock)
+	local playersWhoWereHereBefore = game.HttpService:JSONDecode(detectorBlock.PlayerNames.Value)
+	local playersWhoAreHere = {}
+	local playersAdded = {}
+	local playersRemoved = {}
+
+	--Find out who is here now
+	collectTouchingPlayers(detectorBlock, playersWhoAreHere)
+	
+	--Find out who was added
+	forEachItemInSet(playersWhoAreHere, function(playerName)
+		if not setContains(playersWhoWereHereBefore, playerName) then
+			addToSet(playersAdded, playerName)
+		end
+	end)
+	
+	--Find out who was removed
+	forEachItemInSet(playersWhoWereHereBefore, function(playerName)
+		if not setContains(playersWhoAreHere, playerName) then
+			addToSet(playersRemoved, playerName)
+		end
+	end)	
+	
+	--Update the PlayerNames value, if needed
+	if (isSetEmpty(playersAdded) and isSetEmpty(playersRemoved)) then
+		--No players were added or removed, so no need to update anything or fire any events.
+	else
+		detectorBlock.PlayerNames.Value = game.HttpService:JSONEncode(playersWhoAreHere)
+		detectorBlock.PlayerCount.Value = getSizeOfSet(playersWhoAreHere)
+		--Fire events
+		for _,playerAdded in pairs(playersAdded) do
+			detectorBlock.PlayerEntered:Fire(playerAdded)			
+		end
+		for _,playerRemoved in pairs(playersRemoved) do
+			detectorBlock.PlayerLeft:Fire(playerRemoved)			
+		end		
+	end
+end
+
+-- Figures out which players are touching the given part or model,
+-- and adds them to the given array. Ensures no duplicates.
+function collectTouchingPlayers(partOrModel, playerNames)
+	if (partOrModel:IsA("Model")) then
+		for _,child in pairs(partOrModel:GetChildren()) do
+			collectTouchingPlayers(child, playerNames)
+		end					
+	elseif (partOrModel:IsA("BasePart")) then
+		local part = partOrModel
+
+		-- we need to temporarily make CanCollide = true,
+		-- in order for GetTouchingParts to work.
+		local originalValueOfCanCollide = part.CanCollide
+		part.CanCollide = true	
+		local touchingParts = part:GetTouchingParts()
+		part.CanCollide = originalValueOfCanCollide
+		
+		for _,touchingPart in pairs(touchingParts) do
+			if (touchingPart.Name == "HumanoidRootPart") then
+				--Found a player who is touching the part!
+				local playerName = touchingPart.Parent.Name
+				addToSet(playerNames, playerName)
+			end
+		end		
+	end
+end	
+
+function createObject(parent, objectName, className)
+	local object = Instance.new(className)
+	object.Name = objectName
+	object.Parent = parent
+	return object
+end
+
+function forEachItemInSet(set, whatToDo) 
+	for key,value in pairs(set) do 
+		whatToDo(key)
+	end
+end
+
+-- Based on the given set, returns an array (= table indexed by number),
+-- so that table.getn(...) works.
+function getArray(set)
+	local array = {}
+	for key,value in pairs(set) do
+		table.insert(array, key)
+	end
+	return array
+end
+
+-- adds to set, if the item doesn't already exist
+-- This trick is achieved by storing it as key instead of as value.
+function addToSet(set, item)
+	set[item] = item
+end
+
+function removeFromSet(set, item)
+	set[item] = nil
+end
+
+function setContains(set, item)
+	return set[item] == item
+end
+
+-- This is needed because table.getn(...) doesn't work 
+-- when the table is indexed by strings instead of numerically,
+function getSizeOfSet(set)
+	local size = 0
+	for key,value in pairs(set) do
+		size = size + 1
+	end
+	return size
+end
+
+function isSetEmpty(set)
+	return getSizeOfSet(set)== 0
+end
+
+return playerDetector
